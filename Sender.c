@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
+ #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define Q_SIZE 10000
 #define PKT_SIZE 1000
@@ -61,7 +61,7 @@ BOOL is_first_rtt = TRUE;
 
 int main(void)
 {
-	clock_t _start;
+	int pps;
 	que.cnt = 0;
 	que.head = 0;
 	que.tail = 0;
@@ -73,7 +73,7 @@ int main(void)
 
 	printf("Input initial_sending_rate >>");
 	scanf("%d", &pps);
-	sending_rate = 1 / (double)pps;
+	sending_rate = (double)pps;
 
 	// 소켓 라이브러리 초기화
 	if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0)
@@ -101,29 +101,20 @@ int main(void)
 	recThread = (HANDLE)_beginthreadex(NULL, 0, recThread_func, 0, 0, &recThreadID);
 	printThread = (HANDLE)_beginthreadex(NULL, 0, printThread_func, 0, 0, &printThreadID); // print Thread
 
-	_start = clock();
 
 	/* send 메인 스레드*/
 	while (1)
 	{
-		BOOL is_elapsed; 
 		int retval;
-		
-		EnterCriticalSection(&cs_sdrate);           // lock 획득 혹은 waiting
-		is_elapsed = ELAPSED_TIME(_start, clock()) >= sending_rate;
-		LeaveCriticalSection(&cs_sdrate);           // lock 반환
+		clock_t _timer = clock();
+		while (ELAPSED_TIME(_timer, clock()) < (1/sending_rate)); // minimum RTT 동안 지연한다
 
-		if (is_elapsed)
-		{
-			char send_buf[PKT_SIZE+1]=".";
-			enqueue(&que, clock());
-		
-			retval = sendto(sock, send_buf, PKT_SIZE, 0, (SOCKADDR*)&send_addr, sizeof(send_addr)); // 패킷 전송
-			if (retval == SOCKET_ERROR)
-				perror("wrong");
-			
-			_start = clock();
-		}
+		char send_buf[PKT_SIZE + 1] = ".";
+		enqueue(&que, clock());
+
+		retval = sendto(sock, send_buf, PKT_SIZE, 0, (SOCKADDR*)&send_addr, sizeof(send_addr)); // 패킷 전송
+		if (retval == SOCKET_ERROR)
+			continue;
 	}
 
 	CloseHandle(recThread);
@@ -149,7 +140,7 @@ void error_handle(char* message)
 void incr_sendingrate()
 {
 	EnterCriticalSection(&cs_sdrate);           // lock 획득 혹은 waiting
-	sending_rate = (sending_rate + 1.0) / sending_rate;
+	sending_rate = sending_rate + 1.0/ sending_rate;
 	LeaveCriticalSection(&cs_sdrate);           // lock 반환
 }
 
@@ -254,7 +245,7 @@ UINT WINAPI printThread_func(void* para)
 			LeaveCriticalSection(&cs_avrtt);           // lock 반환
 
 			EnterCriticalSection(&cs_sdrate);           // lock 획득 혹은 waiting
-			printf("[%lf]Sedning Rate : %lf\n", elapsed, sending_rate);
+			printf("[%lf]Sedning Rate : %lf pps\n", elapsed, sending_rate);
 			LeaveCriticalSection(&cs_sdrate);           // lock 반환
 			
 			EnterCriticalSection(&cs_ack);           // lock 획득 혹은 waiting
@@ -323,7 +314,6 @@ UINT WINAPI recThread_func(void* para)
 
 BOOL try_connect()
 {
-	SOCKADDR_IN peer_addr;
 	char send_buf[PKT_SIZE+1], rcv_buf[PKT_SIZE+1];
 	int retval, addrlen;
 
@@ -333,13 +323,10 @@ BOOL try_connect()
 	if (retval == SOCKET_ERROR)
 		return FALSE;
 
-	addrlen = sizeof(peer_addr);
-	retval = recvfrom(sock, rcv_buf, PKT_SIZE, 0, (SOCKADDR*)&peer_addr, &addrlen);
+	addrlen = sizeof(send_addr);
+	retval = recvfrom(sock, rcv_buf, PKT_SIZE, 0, (SOCKADDR*)&send_addr, &addrlen);
 
 	if (retval == SOCKET_ERROR)
-		return FALSE;
-
-	if (memcmp(&peer_addr, &send_addr, sizeof(peer_addr)))
 		return FALSE;
 
 	rcv_buf[retval] = '\0';

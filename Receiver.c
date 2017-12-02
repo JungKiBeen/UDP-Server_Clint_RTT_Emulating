@@ -19,7 +19,6 @@
 typedef SOCKADDR_IN  data; // ms 
 typedef int bool;
 
-/*함수 선언*/
 typedef struct queue {
 	int head;
 	int tail;
@@ -27,6 +26,8 @@ typedef struct queue {
 	data* ar;
 }QUEUE;
 
+/*함수 선언*/
+UINT WINAPI connectThread_func(void* para);
 void error_handle(char* message);
 void enqueue(QUEUE *q, data x);
 data dequeue(QUEUE *q);
@@ -37,13 +38,14 @@ UINT WINAPI printThread_func(void* para);
 UINT WINAPI emulThread_func(void* para);
 void incr_ack_num();
 
+
 /*변수 선언*/
-HANDLE emulThread, printThread;
-UINT emulThreadID, printThreadID;
+HANDLE connectThread, emulThread, printThread;
+UINT connectThreadID, emulThreadID, printThreadID;
 
 WSADATA wsa_data;
-SOCKET sock;
-SOCKADDR_IN send_addr, test_addr;
+SOCKET sock, sock2;
+SOCKADDR_IN send_addr, send_addr2;
 
 // 공유 메모리
 CRITICAL_SECTION cs_ack, cs_que;
@@ -57,6 +59,8 @@ int pps, bottolneck_qsize;
 
 int main(void)
 {
+	int pps;
+
 	que.cnt = 0;
 	que.head = 0;
 	que.tail = 0;
@@ -68,10 +72,11 @@ int main(void)
 
 	printf("Input bottleneck_link_rate >>");
 	scanf("%d", &pps);
-	bottleneck_rate = 1 / (double)pps;
+	bottleneck_rate = (double)pps;
 
 	printf("Input bottleneck_queue_size >>");
 	scanf("%d", &bottolneck_qsize);
+	if (bottolneck_qsize == 1) bottolneck_qsize = 2;
 	que.ar = (data*)malloc(bottolneck_qsize * sizeof(data)); // 큐 사이즈 결정
 
 	// 소켓 라이브러리 초기화
@@ -80,6 +85,7 @@ int main(void)
 
 	// 소켓 생성
 	sock = socket(PF_INET, SOCK_DGRAM, 0);
+	sock2 = socket(PF_INET, SOCK_DGRAM, 0);
 	if (sock == INVALID_SOCKET)
 		error_handle("socket() error!");
 
@@ -87,13 +93,22 @@ int main(void)
 	memset(&send_addr, 0, sizeof(send_addr));
 	send_addr.sin_family = AF_INET;
 	send_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	send_addr.sin_port = htons(12000);
+	send_addr.sin_port = htons(11000);
+
+	memset(&send_addr2, 0, sizeof(send_addr2));
+	send_addr2.sin_family = AF_INET;
+	send_addr2.sin_addr.s_addr = htonl(INADDR_ANY);
+	send_addr2.sin_port = htons(12000);
 
 	if (bind(sock, (SOCKADDR*)&send_addr, sizeof(send_addr)) == SOCKET_ERROR)
 		error_handle("bind() error!");
 
+	if (bind(sock2, (SOCKADDR*)&send_addr2, sizeof(send_addr2)) == SOCKET_ERROR)
+		error_handle("bind() error!");
+
 	emulThread = (HANDLE)_beginthreadex(NULL, 0, emulThread_func, 0, 0, &emulThreadID);
 	printThread = (HANDLE)_beginthreadex(NULL, 0, printThread_func, 0, 0, &printThreadID); // print Thread
+	connectThread = (HANDLE)_beginthreadex(NULL, 0, connectThread_func, 0, 0, &connectThreadID);
 
 
 	int retval;
@@ -102,7 +117,7 @@ int main(void)
 	// Recevie 메인 스레드
 	while (1)
 	{
-		if (ELAPSED_TIME(_timer, clock()) >= bottleneck_rate)
+		if (ELAPSED_TIME(_timer, clock()) >= (1/bottleneck_rate))
 		{
 			if (!queue_empty(&que))
 			{
@@ -112,8 +127,9 @@ int main(void)
 				while (ELAPSED_TIME(_timer, clock()) < minimum_rtt); // minimum RTT 동안 지연한다
 
 				char send_buf[PKT_SIZE + 1] = "ACK";
-				retval = sendto(sock, send_buf, strlen(send_buf), 0, (SOCKADDR*)&recv_addr, sizeof(recv_addr));
-
+				retval = sendto(sock, send_buf, (int)strlen(send_buf), 0, (SOCKADDR*)&recv_addr, sizeof(recv_addr));
+				if (retval == SOCKET_ERROR)
+					continue;
 				incr_ack_num();
 			}
 			_timer = clock(); // 타이머 셋
@@ -218,6 +234,35 @@ data dequeue(QUEUE *q)
 	return ret;
 }
 
+
+UINT WINAPI connectThread_func(void* para)
+{
+	SOCKADDR_IN peer_addr;
+	char rcv_buf[PKT_SIZE + 1];
+	int retval;
+
+	while (1)
+	{
+		int addrlen = sizeof(peer_addr);
+		retval = recvfrom(sock2, rcv_buf, PKT_SIZE, 0, (SOCKADDR*)&peer_addr, &addrlen);
+		if (retval == SOCKET_ERROR)
+			continue;
+
+		if (retval == SOCKET_ERROR)
+			continue;
+		rcv_buf[retval] = '\0';
+
+		if (!strcmp(rcv_buf, "connect"))
+		{
+			char send_buf[PKT_SIZE + 1] = "accept";
+			retval = sendto(sock, send_buf, (int)strlen(send_buf), 0, (SOCKADDR*)&peer_addr, sizeof(peer_addr)); // sock으로 보내어 연결한다.
+			if (retval == SOCKET_ERROR) continue;
+		}
+		
+	}
+
+}
+
 UINT WINAPI emulThread_func(void* para)
 {
 	SOCKADDR_IN peer_addr;
@@ -228,35 +273,29 @@ UINT WINAPI emulThread_func(void* para)
 	{
 		int addrlen = sizeof(peer_addr);
 		retval = recvfrom(sock, rcv_buf, PKT_SIZE, 0, (SOCKADDR*)&peer_addr, &addrlen);
+		if (retval == SOCKET_ERROR)
+			continue;
+		clock_t _timer = clock();
+		while (ELAPSED_TIME(_timer, clock()) < minimum_rtt); // minimum RTT 동안 지연한다
 
 		if (retval == SOCKET_ERROR)
 			continue;
 		rcv_buf[retval] = '\0';
 
-		if (!strcmp(rcv_buf, "connect"))
+		// 큐가 꽉차면 수신한 peer_Addr로 NACK 즉시 회신
+		if (queue_full(&que))
 		{
-			char send_buf[PKT_SIZE + 1] = "accept";
+			clock_t _timer = clock();
+			while (ELAPSED_TIME(_timer, clock()) < minimum_rtt); // minimum RTT 동안 지연한다
+
+			char send_buf[PKT_SIZE + 1] = "NACK";
 			retval = sendto(sock, send_buf, (int)strlen(send_buf), 0, (SOCKADDR*)&peer_addr, sizeof(peer_addr));
 			if (retval == SOCKET_ERROR) continue;
 		}
 
 		else
 		{
-			// 큐가 꽉차면 수신한 peer_Addr로 NACK 즉시 회신
-			if (queue_full(&que))
-			{
-				clock_t _timer = clock();
-				while (ELAPSED_TIME(_timer, clock()) < minimum_rtt); // minimum RTT 동안 지연한다
-
-				char send_buf[PKT_SIZE + 1] = "NACK";
-				retval = sendto(sock, send_buf, (int)strlen(send_buf), 0, (SOCKADDR*)&peer_addr, sizeof(peer_addr));
-				if (retval == SOCKET_ERROR) continue;
-			}
-
-			else
-			{
-				enqueue(&que, peer_addr);
-			}
+			enqueue(&que, peer_addr);
 		}
 	}
 
@@ -271,7 +310,8 @@ UINT WINAPI printThread_func(void* para)
 	_init = clock();
 	_timer = clock();
 	t = 0;
-	// Recevie 메인 스레드
+
+
 	while (1)
 	{
 		if (ELAPSED_TIME(_timer, clock()) >= 0.1)
