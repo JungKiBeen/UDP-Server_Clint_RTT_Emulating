@@ -1,6 +1,6 @@
  #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
-#define Q_SIZE 10000
+#define Q_SIZE 1000000
 #define PKT_SIZE 1000
 #define ALPHA 0.125
 
@@ -49,31 +49,30 @@ SOCKET sock;
 SOCKADDR_IN send_addr;
 
 // 공유 메모리
-CRITICAL_SECTION cs_ack, cs_sdrate, cs_avrtt, cs_que;
+CRITICAL_SECTION cs_ack, cs_nack, cs_sdrate, cs_avrtt, cs_que;
 int acks_num;
 double sending_rate; // sec
 double avgRTT;
 QUEUE que;
 
-int pps;
+int nack_num;
 BOOL is_first_rtt = TRUE;
 
 
 int main(void)
 {
-	int pps;
 	que.cnt = 0;
 	que.head = 0;
 	que.tail = 0;
 
+	InitializeCriticalSection(&cs_nack);    // cs 생성
 	InitializeCriticalSection(&cs_ack);    // cs 생성
 	InitializeCriticalSection(&cs_sdrate);    // cs 생성
 	InitializeCriticalSection(&cs_avrtt);    // cs 생성
 	InitializeCriticalSection(&cs_que);    // cs 생성
 
 	printf("Input initial_sending_rate >>");
-	scanf("%d", &pps);
-	sending_rate = (double)pps;
+	scanf("%lf", &sending_rate);
 
 	// 소켓 라이브러리 초기화
 	if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0)
@@ -122,6 +121,7 @@ int main(void)
 	closesocket(sock);
 	WSACleanup();
 
+	DeleteCriticalSection(&cs_nack);      // cs 제거
 	DeleteCriticalSection(&cs_avrtt);      // cs 제거
 	DeleteCriticalSection(&cs_ack);      // cs 제거
 	DeleteCriticalSection(&cs_sdrate);      // cs 제거
@@ -137,6 +137,7 @@ void error_handle(char* message)
 	exit(1);
 }
 
+
 void incr_sendingrate()
 {
 	EnterCriticalSection(&cs_sdrate);           // lock 획득 혹은 waiting
@@ -149,6 +150,13 @@ void half_sendingrate()
 	EnterCriticalSection(&cs_sdrate);           // lock 획득 혹은 waiting
 	sending_rate = sending_rate / 2.0;
 	LeaveCriticalSection(&cs_sdrate);           // lock 반환
+}
+
+void incr_nacknum()
+{
+	EnterCriticalSection(&cs_nack);           // lock 획득 혹은 waiting
+	nack_num++;
+	LeaveCriticalSection(&cs_nack);           // lock 반환
 }
 
 void incr_acksnum()
@@ -240,6 +248,15 @@ UINT WINAPI printThread_func(void* para)
 			double elapsed = ELAPSED_TIME(_init, clock());
 			
 
+			EnterCriticalSection(&cs_nack);           // lock 획득 혹은 waiting
+			if (nack_num > 0)
+			{
+				half_sendingrate();
+				nack_num = 0;
+			}
+			LeaveCriticalSection(&cs_nack);           // lock 반환
+
+
 			EnterCriticalSection(&cs_avrtt);           // lock 획득 혹은 waiting
 			printf("\n[%lf]Average RTT : %lf\n", elapsed, avgRTT);
 			LeaveCriticalSection(&cs_avrtt);           // lock 반환
@@ -253,9 +270,8 @@ UINT WINAPI printThread_func(void* para)
 			acks_num = 0;
 			LeaveCriticalSection(&cs_ack);           // lock 반환
 
-			printf("[%lf]Goodput : %lf\n\n", elapsed, good_put);
+			printf("[%lf]Goodput : %lf pps\n\n", elapsed, good_put);
 			
-			half_sendingrate();
 			_start = clock();
 		}
 	}
@@ -299,14 +315,14 @@ UINT WINAPI recThread_func(void* para)
 				UPDATE_AVGRTT(sample_rtt);					// 2. avg_RTT 업데이트 
 				LeaveCriticalSection(&cs_avrtt);
 			}
-			incr_acksnum();	// 3. 2초 동안의 acks_num 증가
 
+			incr_acksnum();	// 3. 2초 동안의 acks_num 증가
 		}
 
 		else if (!strcmp(rcv_buf, "NACK"))
 		{
-			half_sendingrate();
-
+			dequeue(&que);
+			incr_nacknum();
 		}
 
 	}

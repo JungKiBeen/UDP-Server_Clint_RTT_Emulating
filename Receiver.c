@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
+ #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define PKT_SIZE 1000
 #define TRUE 1
@@ -52,7 +52,7 @@ CRITICAL_SECTION cs_ack, cs_que;
 int acks_num;
 QUEUE que;
 
-double bottleneck_rate, minimum_rtt; // sec
+double bottleneck_rate, minimum_rtt, half_minrtt; // sec
 int pps, bottolneck_qsize;
 
 
@@ -69,6 +69,7 @@ int main(void)
 
 	printf("Input minimum_RTT >>");
 	scanf("%lf", &minimum_rtt);
+	half_minrtt = minimum_rtt/2;
 
 	printf("Input bottleneck_link_rate >>");
 	scanf("%d", &pps);
@@ -124,7 +125,7 @@ int main(void)
 				SOCKADDR_IN recv_addr = dequeue(&que); // bottleneck 큐에서 데이터를 꺼낸다
 
 				_timer = clock();
-				while (ELAPSED_TIME(_timer, clock()) < minimum_rtt); // minimum RTT 동안 지연한다
+				while (ELAPSED_TIME(_timer, clock()) < half_minrtt); // minimum RTT 동안 지연한다
 
 				char send_buf[PKT_SIZE + 1] = "ACK";
 				retval = sendto(sock, send_buf, (int)strlen(send_buf), 0, (SOCKADDR*)&recv_addr, sizeof(recv_addr));
@@ -276,7 +277,7 @@ UINT WINAPI emulThread_func(void* para)
 		if (retval == SOCKET_ERROR)
 			continue;
 		clock_t _timer = clock();
-		while (ELAPSED_TIME(_timer, clock()) < minimum_rtt); // minimum RTT 동안 지연한다
+		while (ELAPSED_TIME(_timer, clock()) < half_minrtt); // minimum RTT 동안 지연한다
 
 		if (retval == SOCKET_ERROR)
 			continue;
@@ -286,7 +287,7 @@ UINT WINAPI emulThread_func(void* para)
 		if (queue_full(&que))
 		{
 			clock_t _timer = clock();
-			while (ELAPSED_TIME(_timer, clock()) < minimum_rtt); // minimum RTT 동안 지연한다
+			while (ELAPSED_TIME(_timer, clock()) < half_minrtt); // minimum RTT 동안 지연한다
 
 			char send_buf[PKT_SIZE + 1] = "NACK";
 			retval = sendto(sock, send_buf, (int)strlen(send_buf), 0, (SOCKADDR*)&peer_addr, sizeof(peer_addr));
@@ -326,7 +327,7 @@ UINT WINAPI printThread_func(void* para)
 			double elapsed = ELAPSED_TIME(_init, clock());
 
 			EnterCriticalSection(&cs_ack);           // lock 획득 혹은 waiting
-			printf("\n[%lf]Receiving Rate : %lf\n", elapsed, acks_num / 2.0);
+			printf("\n[%lf]Receiving Rate : %lf pps\n", elapsed, acks_num / 2.0);
 			acks_num = 0;
 			LeaveCriticalSection(&cs_ack);           // lock 반환
 			sum = 0;
